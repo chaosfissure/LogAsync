@@ -9,7 +9,7 @@ Async Logging is an asynchronous logging system that allows you to control where
 
 # Motivation
 
-Logging levels are not adequate to describe lines of code logged to a file.  The amount of logging in a large system can be massive, and the difference of switching from an INFO level to a DEBUG level could result in massive new logs being generated, especially if you are only interested in looking at a few of them.
+Logging levels are not adequate to describe lines of code logged to a file.  The amount of logging in a large system can be massive, and the difference of switching from an INFO level to a DEBUG level could result in massive amounts new logs being generated among all source files present in a project.  This makes it hard to track down any data relevant to why you might have switched logging levels, especially if you're only interested in a very small fraction of the data.
 
 LogAsync allows you to further categorize and sort logged lines through additional pieces of information, such as tags.  This allows you to write code that can descriptively tell you the purpose of a log:
 
