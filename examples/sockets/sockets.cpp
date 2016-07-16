@@ -18,9 +18,11 @@ int main(int argc, char* argv[])
     // data before sending it off on a socket for increased efficiency.
     
     auto UDP = Logging::RegisterUDPv4_Destination("10.0.0.5", "5000");
+	auto UDPLogMirror = Logging::RegisterLog("LogAsync_NetworkMirror.txt");
     
     // Sockets are inherited from a LogBase class - which means you can filter what they log.
     UDP->AddInputFilter([](const LogData& l) { return l._tags.find("Cheerio") != l._tags.end(); });
+	UDPLogMirror->AddInputFilter([](const LogData& l) { return l._tags.find("Cheerio") != l._tags.end(); });
 
     volatile bool quit = false;
     std::thread tmp([&quit]() 
@@ -29,7 +31,7 @@ int main(int argc, char* argv[])
         while (!quit)
         {
             LOG_ASYNC("Cheerio") << "Sending cheerios.  Total sent: " << counter++ << std::endl;
-            std::this_thread::sleep_for(milliseconds(5));
+            std::this_thread::sleep_for(milliseconds(1));
         }
     });
 
