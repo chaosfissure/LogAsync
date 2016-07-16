@@ -25,6 +25,7 @@
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
+#include <fmt/printf.h>
 
 #include "LogHandler.h"
 #include "SocketSender.h"
@@ -200,8 +201,7 @@ namespace Logging
 	template <class ...Args>
 	inline void HandlePrintfStyle(const char* src, std::unordered_set<std::string>&& tags, const char* format, Args&& ...args)
 	{
-		std::string tmp = fmt::sprintf(format, std::forward<Args>(args)...);
-		LogPrintfStyle(src, std::move(tags), std::move(tmp));
+		LogPrintfStyle(src, std::move(tags), fmt::sprintf(format, std::forward<Args>(args)...));
 	}
 	inline void HandlePrintfStyleEmpty(const char* src, std::unordered_set<std::string>&& tags, const char* format)
 	{

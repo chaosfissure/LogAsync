@@ -161,6 +161,9 @@ private:
 	volatile bool _diskIsFull;
 	double _diskThreshold;
 
+	system_clock::time_point _lastCheckedDiskSpace;
+	microseconds _diskCheckInterval;
+
     // Keeps track of the way the class cycles through files and creates new logs.
     ROTATION_METHOD _rotationType;
 
@@ -183,7 +186,8 @@ private:
 
     // A thread that periodically monitors the status of the logging and handles periodic rotation if need be.
     std::unique_ptr<ThreadRAII> _monitorRotation;
-	std::unique_ptr<ThreadRAII> _monitorDiskSpace;
+
+	std::string _logBuffer;
 
     // ------------------------------------------------------------------------------------
     // Check if the file has exceeded its max size and shift/cascade rename if necessary.
@@ -193,9 +197,10 @@ private:
     void CheckSizeAndShift();
 
 	// ------------------------------------------------------------------------------------
-	// Periodically check and make sure we have enough disk space to do logging.
+	// Check disk space to make sure we have enough free space to do logging.
+	// It monitors data periodically rather than continuously to preserve speed.
 	// ------------------------------------------------------------------------------------
-	void CheckDiskSpace(const volatile bool& quitEarly);
+	void CheckDiskSpace();
 
     // ------------------------------------------------------------------------------------
     // Extract file size information from the file.

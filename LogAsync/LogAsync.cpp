@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <future>
 #include <iterator>
+#include <condition_variable>
 
 #include <boost/lexical_cast.hpp>
 #include <boost/thread/locks.hpp>
@@ -24,6 +25,8 @@
 #endif
 
 constexpr uint_fast32_t DEQUE_SIZE = 256;
+constexpr uint_fast32_t NUM_LOGGING_WORKERS = 2;
+
 
 static const std::array<const char*, 6> LOG_LEVELS =
 {
@@ -47,7 +50,7 @@ enum LOG_LEVELS_INTEGRAL
 
 
 
-inline int LogLevelPosition(const char* src)
+inline int64_t LogLevelPosition(const char* src)
 {
 	const auto position = std::find(LOG_LEVELS.begin(), LOG_LEVELS.end(), src);
 	if (position == LOG_LEVELS.end()) { return LOG_ALL_INT; }
@@ -113,6 +116,7 @@ namespace Logging
 	// Graceful program termination without needing to manually unregister something is good!
 	class LogRAII;
 	std::unique_ptr<LogRAII> terminate_logging;
+
 }
 
 // --------------------------------------------------------------------------------------------
@@ -378,27 +382,28 @@ namespace Logging
 
 		while (!quit)
 		{
+			std::vector<std::future<void>> futures;
 			asyncQueue.Dequeue(dataVec);
 			if (!dataVec.empty())
 			{
-				std::vector<std::future<void>> toEachLog;
 				unsigned expiredLogs = 0;
 
 				// Lock Guard scoping
 				{
 					boost::shared_lock<boost::shared_mutex> lock(logAdditionMutex);
 
-					for (auto& input : allActiveLogs)
+					for (auto& weakRef : allActiveLogs)
 					{
-						if (auto weakRef = input.lock())
+						if (auto strongRef = weakRef.lock())
 						{
-							toEachLog.emplace_back(std::async(std::launch::async, [weakRef, &dataVec]() { weakRef->HandleQueue(dataVec); }));
+							futures.emplace_back(std::async([strongRef, &dataVec] { strongRef->HandleQueue(dataVec); }));
 						}
 						else { ++expiredLogs; }
 					}
 				}
 
-				for (auto& elem : toEachLog) { elem.get(); }
+				for (auto& future : futures) { future.get(); }
+
 				HandleExpiredLogs(expiredLogs);
 			}
 			else { std::this_thread::sleep_for(milliseconds(1)); }
@@ -415,33 +420,30 @@ namespace Logging
 		// purely in order, we need to extract and sort the input data in order for
 		// a sorted method - thus we need to exhaust the entire input queue.
 		std::vector<LogData> dataVec;
-		auto asyncBackup = std::make_shared<moodycamel::ConcurrentQueue<LogData>>();
-
-		LogData pumpLogData;
-
+	
 		while (!quit)
 		{
 			asyncQueue.Dequeue(dataVec);
 			if (!dataVec.empty())
 			{
-				std::vector<std::future<void>> toEachLog;
+				std::vector<std::future<void>> futures;
 				unsigned expiredLogs = 0;
 
 				// Lock Guard scoping
 				{
 					boost::shared_lock<boost::shared_mutex> lock(logAdditionMutex);
 
-					for (auto& input : allActiveLogs)
+					for (auto& weakRef : allActiveLogs)
 					{
-						if (auto weakRef = input.lock())
+						if (auto strongRef = weakRef.lock())
 						{
-							toEachLog.emplace_back(std::async(std::launch::async, [weakRef, &dataVec]() { weakRef->HandleQueue(dataVec); }));
+							futures.emplace_back(std::async([strongRef, &dataVec] { strongRef->HandleQueue(dataVec); }));
 						}
 						else { ++expiredLogs; }
 					}
 				}
 
-				for (auto& elem : toEachLog) { elem.get(); }
+				for (auto& future : futures) { future.get(); }
 				HandleExpiredLogs(expiredLogs);
 			}
 			else { std::this_thread::sleep_for(milliseconds(1)); }

@@ -3,16 +3,17 @@
 
 #include "LogHandler.h"
 
+constexpr milliseconds DEFAULT_DISK_CHECK_INTERVAL = milliseconds(5000);
 constexpr size_t BUFFER_SIZE = 4096;
 
 // ---------------------------------------------------------------------------------
 // Implementation for LogBase
 // ---------------------------------------------------------------------------------
 LogBase::LogBase() :
-    _filterLock(),
-    _configLock(),
+	_filterLock(),
+	_configLock(),
 	_useCache(true),
-    _localQuitLogging(false),
+	_localQuitLogging(false),
     _config(),
     _inputFilters(),
 	_sourceEvalCache()
@@ -110,32 +111,36 @@ void LogBase::SetConfiguration(const std::string& logformat, const std::string& 
 // Implementation for RotatedLog
 // ---------------------------------------------------------------------------------
 RotatedLog::RotatedLog(const std::string& baseName) :
-    LogBase(),
+	LogBase(),
 
-    _activeFileSize(0),
-    _filename(baseName),
+	_activeFileSize(0),
+	_filename(baseName),
 
 	_diskIsFull(false),
 	_diskThreshold(100.0),
 
-    _rotationType(ROTATION_METHOD::NO_ROTATION),
-    _maxFilesizeBytes(0),
+	_lastCheckedDiskSpace(system_clock::now()),
 
-    _rotateIntervalSeconds(0),
-    _numToRotateThrough(0),
+	_rotationType(ROTATION_METHOD::NO_ROTATION),
+	_maxFilesizeBytes(0),
 
-    _rotationHMS({0,0,0}),
-    _lastRotatedAt(system_clock::now()),
+	_rotateIntervalSeconds(0),
+	_numToRotateThrough(0),
 
-    _monitorRotation(nullptr),
-	_monitorDiskSpace(nullptr)
+	_rotationHMS({0,0,0}),
+	_lastRotatedAt(system_clock::now()),
+	_diskCheckInterval(DEFAULT_DISK_CHECK_INTERVAL),
+
+    _monitorRotation(),
+
+	_logBuffer()
 {
     if (_filename.empty())
     {
         _filename = "Unknown." + boost::lexical_cast<std::string>(time(0)) + ".log";
     }
 
-	_monitorDiskSpace = std::make_unique<ThreadRAII>(&RotatedLog::CheckDiskSpace, this);
+	CheckDiskSpace();
 }
 
 RotatedLog::~RotatedLog() 
@@ -370,23 +375,20 @@ void RotatedLog::CheckSizeAndShift()
 
 void RotatedLog::HandleQueue(const std::vector<LogData>& toLog)
 {
-    std::string buffer;
-	buffer.reserve(BUFFER_SIZE);
-
-    constexpr uint64_t elemSize = sizeof(decltype(buffer)::value_type); // Futureproofing in case unicode or something?
+    constexpr uint64_t elemSize = sizeof(decltype(_logBuffer)::value_type); // Futureproofing in case unicode or something?
 
 	std::lock(_fileLock, _configLock, _filterLock);
     std::lock_guard<std::mutex> lock_io(_fileLock, std::adopt_lock);
     std::lock_guard<std::mutex> lock_config(_configLock, std::adopt_lock);
 	std::lock_guard<std::mutex> lock_filters(_filterLock, std::adopt_lock);
 
+	if (system_clock::now() - _lastCheckedDiskSpace >= _diskCheckInterval) { CheckDiskSpace(); }
+
     // Make sure the log file hasn't been deleted or something.
     if (_localQuitLogging) { return; }
 
-    if (!_logfile.is_open())
-    {
-        OpenLog(ConstructLogFileName());
-    }
+	// Make sure we log to a file that actually is open.
+    if (!_logfile.is_open()) { OpenLog(ConstructLogFileName()); }
 
     // If we can't open a file, there's no sense in trying to log to it.
     // NOTE: This means that entries will be skipped from logging if we
@@ -394,22 +396,22 @@ void RotatedLog::HandleQueue(const std::vector<LogData>& toLog)
 
     if (_logfile.is_open() && !_diskIsFull)
     {
-        std::string buffer;
-        
+		_logBuffer.clear();
+
         // Log all the lines that are good to log.
         for (const auto& elem : toLog)
         {
             if (MeetsLoggingCriteria(elem) && !_localQuitLogging)
             {
-				_config.AppendLogToString(elem, buffer);
-				buffer += '\n';
+				_config.AppendLogToString(elem, _logBuffer);
+				_logBuffer += '\n';
 
-                if (buffer.size() >= BUFFER_SIZE)
+                if (_logBuffer.size() >= BUFFER_SIZE)
                 {
-                    _logfile << buffer;
+                    _logfile << _logBuffer;
                     _logfile.flush();
-                    _activeFileSize += buffer.size() * elemSize;
-                    buffer.clear();
+                    _activeFileSize += _logBuffer.size() * elemSize;
+					_logBuffer.clear();
                 }
                 CheckSizeAndShift();
             }
@@ -419,12 +421,12 @@ void RotatedLog::HandleQueue(const std::vector<LogData>& toLog)
         // buffer isn't full, then we'll just log the content here so
 		// that we don't need to wait for additional content to keep being logged.
 
-        if (!_localQuitLogging && !buffer.empty() && !_diskIsFull)
+        if (!_localQuitLogging && !_logBuffer.empty() && !_diskIsFull)
         {
-			_logfile << buffer;
+			_logfile << _logBuffer;
 			_logfile.flush();
-			_activeFileSize += buffer.size() * elemSize;
-			buffer.clear();
+			_activeFileSize += _logBuffer.size() * elemSize;
+			_logBuffer.clear();
 			CheckSizeAndShift();
         }
     }
@@ -467,7 +469,7 @@ void RotatedLog::ResetLogsAtSize(const uint64_t bytes, const int numToRotateThro
     // There's no monitoring thread as the logging function itself will keep track of
     // file size and switch to a new file as needed.
 
-    _monitorRotation = nullptr;
+    _monitorRotation.reset(nullptr);
 
     _rotationType = ROTATION_METHOD::ROTATE_WHEN_SIZE;
     _maxFilesizeBytes = bytes;
@@ -491,10 +493,8 @@ void RotatedLog::SetDiskThresholdPercent(const double d)
 	_diskThreshold = d;
 }
 
-void RotatedLog::CheckDiskSpace(const volatile bool& b)
+void RotatedLog::CheckDiskSpace()
 {
-	while (!b)
-	{
 		auto path = boost::filesystem::absolute(ConstructLogFileName()).parent_path();
 		if (boost::filesystem::exists(path))
 		{
@@ -504,6 +504,5 @@ void RotatedLog::CheckDiskSpace(const volatile bool& b)
 			_diskIsFull = (usedPercent >= _diskThreshold);
 		}
 
-		InterruptedSleepFor(seconds(5), b);
-	}
+		_lastCheckedDiskSpace = system_clock::now();
 }

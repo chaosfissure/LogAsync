@@ -32,6 +32,12 @@ struct QueueAndSize
 		_queue.enqueue(std::move(l));
 		--_writers;
 	}
+
+	void Reset()
+	{
+		_writers = 0;
+		_insertPos = 0;
+	}
 };
 
 
@@ -45,10 +51,17 @@ class ConcurrentQueueWrapper
 {
 private:
 	std::atomic<uint64_t> _requestsRemaining;
-	std::shared_ptr<QueueAndSize> _activeQueue;
+
+	//std::shared_ptr<QueueAndSize> _activeQueue;
 
 	std::function<void(LogData&&)> _handleIn;
 	std::function<void(std::vector<LogData>&)> _handleOut;
+
+	QueueAndSize _queue1;
+	QueueAndSize _queue2;
+
+	QueueAndSize* _standbyQueue;
+	std::atomic<QueueAndSize*> _activeQueue;
 
 	std::vector<LogData> _tmpDequeue;
 
@@ -57,7 +70,7 @@ private:
 	// ------------------------------------------------------------------------------------------------------
 	void EnqueueSorted(LogData&& l)
 	{
-		std::atomic_load_explicit(&_activeQueue, std::memory_order_acquire)->AddToQueueOrdered(std::move(l));
+		_activeQueue.load(std::memory_order_acquire)->AddToQueueOrdered(std::move(l));
 	}
 
 	// ------------------------------------------------------------------------------------------------------
@@ -65,7 +78,7 @@ private:
 	// ------------------------------------------------------------------------------------------------------
 	void EnqueueUnsorted(LogData&& l)
 	{
-		_activeQueue->AddToQueueUnordered(std::move(l));
+		_queue1.AddToQueueUnordered(std::move(l));
 	}
 
 	// ------------------------------------------------------------------------------------------------------
@@ -73,11 +86,10 @@ private:
 	// ------------------------------------------------------------------------------------------------------
 	void DequeueSorted(std::vector<LogData>& toWhere)
 	{
-		auto standbyQueue = std::make_shared<QueueAndSize>();
-		auto dequeueFrom = std::atomic_exchange(&_activeQueue, standbyQueue);
-		
-		while (dequeueFrom->_writers.load(std::memory_order_relaxed) != 0) { std::this_thread::yield(); }
-		const uint64_t maxSize = dequeueFrom->_insertPos.load(std::memory_order_relaxed) + 1;
+		_standbyQueue = _activeQueue.exchange(_standbyQueue);
+
+		while (_standbyQueue->_writers.load(std::memory_order_relaxed) != 0) { std::this_thread::yield(); }
+		const uint64_t maxSize = _standbyQueue->_insertPos.load(std::memory_order_relaxed) + 1;
 		
 		if (maxSize <= 1) 
 		{
@@ -87,14 +99,15 @@ private:
 		
 		// Timsort to sort by input ID.
 		toWhere.resize(maxSize);
-		const uint64_t actualSize = dequeueFrom->_queue.try_dequeue_bulk(toWhere.data(), maxSize);
+		const uint64_t actualSize = _standbyQueue->_queue.try_dequeue_bulk(toWhere.data(), maxSize);
 		toWhere.resize(actualSize);
 		gfx::timsort(toWhere.begin(), toWhere.end());
 		
 		// The sorted variant - iterate through a raw dequeue_bulk and pointer swap into a container
 		// in a sorted way - isn't as fast as timsort by far on average.
-		
+
 		_requestsRemaining -= actualSize;
+		_standbyQueue->Reset();
 	}
 
 	// ------------------------------------------------------------------------------------------------------
@@ -103,7 +116,8 @@ private:
 	void DequeueUnsorted(std::vector<LogData>& toWhere)
 	{
 		toWhere.resize(LOG_DEQUE_SIZE);
-		const size_t numDequeued = _activeQueue->_queue.try_dequeue_bulk(toWhere.data(), LOG_DEQUE_SIZE);
+		//const size_t numDequeued = _activeQueue->_queue.try_dequeue_bulk(toWhere.data(), LOG_DEQUE_SIZE);
+		const size_t numDequeued = _queue1._queue.try_dequeue_bulk(toWhere.data(), LOG_DEQUE_SIZE);
 		toWhere.resize(numDequeued);
 		_requestsRemaining -= numDequeued;
 	}
@@ -112,18 +126,24 @@ public:
 
 	ConcurrentQueueWrapper() :
 		_requestsRemaining(0),
-		_activeQueue(std::make_shared<QueueAndSize>()),
 		_handleIn([this](LogData&& l) { EnqueueSorted(std::move(l)); }),
 		_handleOut([this](std::vector<LogData>& toLog) { DequeueSorted(toLog); }),
+		_queue1(),
+		_queue2(),
+		_standbyQueue(nullptr),
+		_activeQueue(nullptr),
 		_tmpDequeue()
-	{}
+	{
+		_standbyQueue = &_queue2;
+		_activeQueue = &_queue1;
+	}
 
 	~ConcurrentQueueWrapper() {}
 
 	// ------------------------------------------------------------------------------------------------------
 	// Load number of requests not yet processed in the queue (num in - num dequed)
 	// ------------------------------------------------------------------------------------------------------
-	uint64_t GetRequestsRemaining() const { return _activeQueue ? _requestsRemaining.load(std::memory_order_relaxed) : 0; }
+	uint64_t GetRequestsRemaining() const { return _requestsRemaining.load(std::memory_order_relaxed); }
 
 	void AddToQueue(LogData&& l)
 	{
