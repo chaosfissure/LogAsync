@@ -1,3 +1,6 @@
+#include <atomic>
+#include <chrono>
+
 #include "LogAsync.h"
 
 int main(int argc, char* argv[])
@@ -15,7 +18,7 @@ int main(int argc, char* argv[])
 
     // Register a log that switches daily, and have the daily switch occur four seconds after the current point in time
     // so that we can see the switch actually occur.
-    const time_t tNow = chrono_clock::to_time_t(chrono_clock::now() + seconds(4));
+    const time_t tNow = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now() + seconds(4));
     tm switchAt = {0};
     LOCALTIME_FUNC(&tNow, &switchAt);
     auto logfile4 = Logging::RegisterDailyLog("LogAsync_RotateAtTime.txt", switchAt.tm_hour, switchAt.tm_min, switchAt.tm_sec); // Register a log that rotates
@@ -34,8 +37,8 @@ int main(int argc, char* argv[])
                 while (!quitRequest)
                 {
                     // Note that this logging doesn't guarantee perfect ordering of the counter --
-                    // there may be times where the atomic int from a thread is updated before it
-                    // actually gets queued in the logging system!
+                    // there may be times where a thread may pull an atomic value before another thread,
+					// but another thread may actually initiate the log request first!
 
                     LOG_ASYNC("Things") << "Thread " << id << " logging " << counter++ << std::endl;
                     std::this_thread::sleep_for(milliseconds(1));
